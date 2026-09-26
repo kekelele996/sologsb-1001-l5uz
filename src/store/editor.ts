@@ -1,7 +1,8 @@
 import { defineStore } from 'pinia'
-import type { Cue, EditorDocument, Locale, Snapshot } from '../types'
+import type { Cue, EditorDocument, Locale, SequenceConflict, Snapshot } from '../types'
 import { loadDocument, saveDocument } from '../utils/db'
 import { makeId } from '../utils/id'
+import { countReadableChars, estimateDuration } from '../utils/dubbing'
 import { parseScript, parseSrt, toSrt } from '../utils/subtitle'
 import { translate, type MessageKey } from '../i18n'
 
@@ -58,6 +59,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
     tabId: makeId('tab'),
     lastSeenRevision: 0,
     mutationSerial: 0,
+    sequenceConflict: null as SequenceConflict | null,
     past: [] as { label: string; cues: Cue[]; selectedCueId: string | null }[],
     future: [] as { label: string; cues: Cue[]; selectedCueId: string | null }[],
   }),
@@ -128,6 +130,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
       this.future = []
       this.document.cues = working
       if (nextSelection !== undefined) this.selectedCueId = nextSelection
+      this.sequenceConflict = null
       this.markChanged(label)
     },
     markChanged(label: string, persist = true) {
@@ -201,6 +204,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
       this.future.push({ label: entry.label, cues: cloneCues(this.document.cues), selectedCueId: this.selectedCueId })
       this.document.cues = cloneCues(entry.cues)
       this.selectedCueId = entry.selectedCueId
+      this.sequenceConflict = null
       this.markChanged(`undo:${entry.label}`)
     },
     redo() {
@@ -209,6 +213,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
       this.past.push({ label: entry.label, cues: cloneCues(this.document.cues), selectedCueId: this.selectedCueId })
       this.document.cues = cloneCues(entry.cues)
       this.selectedCueId = entry.selectedCueId
+      this.sequenceConflict = null
       this.markChanged(`redo:${entry.label}`)
     },
     updateCue(id: string, patch: Partial<Cue>, historyLabel = 'update-cue') {
@@ -296,7 +301,49 @@ export const useEditorStore = defineStore('subtitle-editor', {
       this.future = []
       this.document.cues = cloneCues(snapshot.cues)
       this.selectedCueId = this.document.cues[0]?.id ?? null
+      this.sequenceConflict = null
       this.markChanged('restore-snapshot')
+    },
+    autoSequence(): { moved: number; conflict: SequenceConflict | null } {
+      const cues = this.document.cues
+      const placements = new Map<string, { start: number; end: number }>()
+      const round = (value: number) => Math.round(value * 100) / 100
+      let cursor = cues[0]?.start ?? 0
+      let lastCueId: string | null = null
+      let conflict: SequenceConflict | null = null
+      for (const cue of cues) {
+        if (cue.locked) {
+          if (lastCueId && cursor > cue.start + 1e-6) {
+            conflict = { cueId: lastCueId, lockedId: cue.id, overlap: round(cursor - cue.start) }
+            break
+          }
+          cursor = cue.end
+          lastCueId = cue.id
+          continue
+        }
+        const duration = countReadableChars(cue.target) ? estimateDuration(cue) : Math.max(0.1, cue.end - cue.start)
+        const start = lastCueId === null ? cue.start : round(cursor + 0.2)
+        const end = round(start + duration)
+        if (Math.abs(start - cue.start) > 1e-6 || Math.abs(end - cue.end) > 1e-6) placements.set(cue.id, { start, end })
+        cursor = start + duration
+        lastCueId = cue.id
+      }
+      if (placements.size) {
+        this.commit('auto-sequence', (working) => {
+          for (const cue of working) {
+            const placement = placements.get(cue.id)
+            if (placement) {
+              cue.start = placement.start
+              cue.end = placement.end
+            }
+          }
+        }, conflict ? conflict.cueId : undefined)
+      }
+      this.sequenceConflict = conflict
+      return { moved: placements.size, conflict }
+    },
+    clearSequenceConflict() {
+      this.sequenceConflict = null
     },
     importText(text: string, filename: string) {
       const lower = filename.toLowerCase()

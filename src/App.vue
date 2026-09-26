@@ -4,14 +4,16 @@ import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Clock, Delete, DocumentCopy, Download, EditPen, Files, Lock, MagicStick, Monitor,
-  RefreshLeft, RefreshRight, Search, Unlock, UploadFilled,
+  Rank, RefreshLeft, RefreshRight, Search, Unlock, UploadFilled,
 } from '@element-plus/icons-vue'
 import { useEditorStore } from './store/editor'
 import type { Cue, CueConflict } from './types'
 import { formatTime } from './utils/subtitle'
+import { BASE_RATE, dubbingFit, isOverflow } from './utils/dubbing'
+import DubbingBadge from './components/DubbingBadge.vue'
 
 const store = useEditorStore()
-const { document: project, selectedCue, selectedCueId, visibleCues, saveState, conflict, online, timelineZoom, actorFilter } = storeToRefs(store)
+const { document: project, selectedCue, selectedCueId, visibleCues, saveState, conflict, online, timelineZoom, actorFilter, sequenceConflict } = storeToRefs(store)
 const fileInput = ref<HTMLInputElement>()
 const snapshotDialog = ref(false)
 const snapshotName = ref('')
@@ -32,6 +34,28 @@ const actorColor = (id: string) => project.value.actors.find((actor) => actor.id
 const actorName = (id: string) => project.value.actors.find((actor) => actor.id === id)?.name ?? '—'
 const statusLabel = (status: Cue['status']) => store.t(status)
 const statusType = (status: Cue['status']) => status === 'reviewed' ? 'success' : status === 'issue' ? 'danger' : 'info'
+const cueOverflow = (cue: Cue) => isOverflow(dubbingFit(cue))
+const selectedFit = computed(() => selectedCue.value ? dubbingFit(selectedCue.value) : null)
+const selectedOverflow = computed(() => selectedFit.value ? isOverflow(selectedFit.value) : false)
+const cueLabel = (id: string) => {
+  const index = project.value.cues.findIndex((cue) => cue.id === id)
+  const cue = project.value.cues[index]
+  return cue ? `#${index + 1} ${actorName(cue.actorId)}` : '—'
+}
+const sequenceConflictText = computed(() => {
+  const info = sequenceConflict.value
+  if (!info) return ''
+  return store.t('sequenceConflictBody', { cue: cueLabel(info.cueId), locked: cueLabel(info.lockedId), seconds: info.overlap.toFixed(2) })
+})
+const isSequenceConflictCue = (id: string) => {
+  const info = sequenceConflict.value
+  return !!info && (info.cueId === id || info.lockedId === id)
+}
+const timelineTitle = (cue: Cue) => {
+  const base = `${formatTime(cue.start)} · ${cue.source}`
+  const fit = dubbingFit(cue)
+  return isOverflow(fit) ? `${base} · ${store.t('dubbingOverflow', { seconds: fit.overflow.toFixed(2) })}` : base
+}
 
 function updateSelected(patch: Partial<Cue>, label = 'update-cue') {
   if (selectedCue.value) store.updateCue(selectedCue.value.id, patch, label)
@@ -89,6 +113,12 @@ function createSnapshot() {
   snapshotName.value = ''
   snapshotDialog.value = false
   ElMessage.success(store.t('savedNow'))
+}
+function runAutoSequence() {
+  const result = store.autoSequence()
+  if (result.conflict) ElMessage.warning(store.t('sequenceConflictTitle'))
+  else if (result.moved) ElMessage.success(store.t('autoSequenceDone', { count: result.moved }))
+  else ElMessage.info(store.t('autoSequenceEmpty'))
 }
 function onKeydown(event: KeyboardEvent) {
   const target = event.target as HTMLElement
@@ -163,6 +193,14 @@ const handleOffline = () => setOnline(false)
       </div>
     </div>
 
+    <div v-if="sequenceConflict" class="sequence-conflict-banner">
+      <div>
+        <strong>{{ store.t('sequenceConflictTitle') }}</strong>
+        <span>{{ sequenceConflictText }}</span>
+      </div>
+      <el-button size="small" text @click="store.clearSequenceConflict">{{ store.t('dismiss') }}</el-button>
+    </div>
+
     <main class="workspace">
       <aside class="left-panel panel">
         <section>
@@ -215,9 +253,9 @@ const handleOffline = () => setOnline(false)
           <div class="timeline-scroll">
             <div class="timeline" :style="{ width: `${timelineZoom * 100}%` }">
               <button
-                v-for="cue in filteredCues" :key="cue.id" class="timeline-block" :class="{ active: cue.id === selectedCueId, issue: cue.status === 'issue', locked: cue.locked }"
+                v-for="cue in filteredCues" :key="cue.id" class="timeline-block" :class="{ active: cue.id === selectedCueId, issue: cue.status === 'issue', locked: cue.locked, overflow: cueOverflow(cue), 'seq-conflict': isSequenceConflictCue(cue.id) }"
                 :style="{ left: `${(cue.start / store.totalDuration) * 100}%`, width: `${Math.max(1.8, ((cue.end - cue.start) / store.totalDuration) * 100)}%`, borderColor: actorColor(cue.actorId) }"
-                :title="`${formatTime(cue.start)} · ${cue.source}`" @click="store.selectCue(cue.id)"
+                :title="timelineTitle(cue)" @click="store.selectCue(cue.id)"
               ><span>{{ actorName(cue.actorId).split('/')[0] }}</span><b>{{ cue.target || cue.source }}</b></button>
               <div class="timeline-ruler"><span v-for="tick in [0, 15, 30, 45, 60]" :key="tick" :style="{ left: `${(tick / store.totalDuration) * 100}%` }">{{ tick }}s</span></div>
             </div>
@@ -226,16 +264,19 @@ const handleOffline = () => setOnline(false)
 
         <div class="cue-toolbar">
           <div class="section-heading"><span>{{ store.t('cues') }}</span><el-tag size="small" type="info">{{ filteredCues.length }}</el-tag></div>
-          <el-input v-model="search" :prefix-icon="Search" clearable placeholder="搜索原文或译文" class="cue-search" />
-          <el-select v-model="actorFilter" class="actor-mobile-filter">
-            <el-option :label="store.t('allActors')" value="all" />
-            <el-option v-for="actor in project.actors" :key="actor.id" :label="actor.name" :value="actor.id" />
-          </el-select>
+          <div class="cue-toolbar-actions">
+            <el-button :icon="Rank" @click="runAutoSequence">{{ store.t('autoSequence') }}</el-button>
+            <el-input v-model="search" :prefix-icon="Search" clearable placeholder="搜索原文或译文" class="cue-search" />
+            <el-select v-model="actorFilter" class="actor-mobile-filter">
+              <el-option :label="store.t('allActors')" value="all" />
+              <el-option v-for="actor in project.actors" :key="actor.id" :label="actor.name" :value="actor.id" />
+            </el-select>
+          </div>
         </div>
 
         <div class="cue-list">
           <article
-            v-for="(cue, index) in filteredCues" :key="cue.id" class="cue-row" :class="{ active: cue.id === selectedCueId, issue: cue.status === 'issue', locked: cue.locked }"
+            v-for="(cue, index) in filteredCues" :key="cue.id" class="cue-row" :class="{ active: cue.id === selectedCueId, issue: cue.status === 'issue', locked: cue.locked, 'seq-conflict': isSequenceConflictCue(cue.id) }"
             tabindex="0" @click="store.selectCue(cue.id)" @keydown.enter="store.selectCue(cue.id)"
           >
             <div class="cue-number">{{ String(index + 1).padStart(2, '0') }}</div>
@@ -243,6 +284,7 @@ const handleOffline = () => setOnline(false)
               <div class="cue-topline">
                 <span class="actor-pill" :style="{ '--actor': actorColor(cue.actorId) }">{{ actorName(cue.actorId) }}</span>
                 <code>{{ formatTime(cue.start) }} → {{ formatTime(cue.end) }}</code>
+                <DubbingBadge :cue="cue" />
                 <el-tag size="small" :type="statusType(cue.status)">{{ statusLabel(cue.status) }}</el-tag>
                 <el-icon v-if="cue.locked"><Lock /></el-icon>
                 <span class="cue-warning-count" v-if="cueWarnings(cue).length">{{ cueWarnings(cue).length }} context</span>
@@ -284,6 +326,15 @@ const handleOffline = () => setOnline(false)
           <div class="two-columns">
             <div><label>{{ store.t('speed') }}</label><el-input-number :model-value="selectedCue.speed" :disabled="selectedCue.locked" :min="0.5" :max="1.8" :step="0.01" controls-position="right" @change="updateSelected({ speed: Number($event) }, 'speed')" /></div>
             <div><label>{{ store.t('status') }}</label><el-select :model-value="selectedCue.status" :disabled="selectedCue.locked" @change="store.markStatus(selectedCue.id, $event)"><el-option :label="store.t('draft')" value="draft" /><el-option :label="store.t('reviewed')" value="reviewed" /><el-option :label="store.t('issue')" value="issue" /></el-select></div>
+          </div>
+          <div v-if="selectedFit" class="dubbing-card" :class="{ overflow: selectedOverflow }">
+            <h3>{{ store.t('dubbingEstimate') }}</h3>
+            <template v-if="selectedFit.chars">
+              <p>{{ store.t('dubbingDetail', { chars: selectedFit.chars, rate: BASE_RATE, speed: selectedCue.speed, estimated: selectedFit.estimated.toFixed(1), window: selectedFit.window.toFixed(1) }) }}</p>
+              <p v-if="selectedOverflow" class="check-warning">{{ store.t('dubbingOverflow', { seconds: selectedFit.overflow.toFixed(2) }) }}</p>
+              <p v-else class="check-ok">{{ store.t('dubbingFits') }}</p>
+            </template>
+            <p v-else class="check-note">{{ store.t('dubbingNoTarget') }}</p>
           </div>
           <label>{{ store.t('termsUsed') }}</label>
           <el-select :model-value="selectedCue.termIds" multiple :disabled="selectedCue.locked" @change="updateSelected({ termIds: $event }, 'terms')">

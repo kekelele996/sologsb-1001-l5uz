@@ -54,6 +54,12 @@ export interface CueConflict {
   message: string
 }
 
+export interface SequenceConflict {
+  cueId: string
+  lockedId: string
+  overlap: number
+}
+
 export interface HistoryEntry {
   label: string
   cues: Cue[]

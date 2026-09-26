@@ -33,6 +33,8 @@ button, input, textarea { font: inherit; }
 .conflict-banner { display: flex; align-items: center; justify-content: space-between; gap: 24px; color: #721c24; background: #fff0f0; border-bottom: 1px solid #f3b8b8; }
 .conflict-banner strong { margin-right: 12px; }
 .conflict-actions { display: flex; gap: 8px; }
+.sequence-conflict-banner { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 9px 22px; color: #8a4a12; background: #fff4e2; border-bottom: 1px solid #f0d5a8; font-size: 13px; }
+.sequence-conflict-banner strong { margin-right: 12px; }
 .workspace { height: calc(100vh - 78px); min-height: 720px; display: grid; grid-template-columns: 258px minmax(640px, 1fr) 360px; overflow: hidden; }
 .panel { overflow: auto; background: rgba(255,255,255,.86); }
 .left-panel { border-right: 1px solid var(--line); padding: 18px 14px; }
@@ -70,9 +72,13 @@ button, input, textarea { font: inherit; }
 .timeline-block.active { color: #fff; background: #234f9d; box-shadow: 0 0 0 2px #9db9ed; }
 .timeline-block.issue { outline: 2px solid #e86b64; }
 .timeline-block.locked { opacity: .62; }
+.timeline-block.overflow { outline: 2px solid #e0705f; }
+.timeline-block.overflow::after { content: "!"; position: absolute; top: 1px; right: 4px; color: #d0342c; font-size: 9px; font-weight: 800; }
+.timeline-block.seq-conflict { outline: 2px dashed #c2342c; }
 .timeline-ruler { position: absolute; left: 0; right: 0; top: 67px; }
 .timeline-ruler span { position: absolute; color: #98a3b4; font-size: 9px; }
 .cue-toolbar { display: flex; align-items: center; justify-content: space-between; margin: 18px 2px 8px; }
+.cue-toolbar-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .cue-search { width: 230px; }
 .actor-mobile-filter { display: none; }
 .cue-list { display: grid; gap: 7px; }
@@ -81,6 +87,9 @@ button, input, textarea { font: inherit; }
 .cue-row.active { border-color: #5d87dc; box-shadow: 0 0 0 3px rgba(47,111,237,.1), 0 7px 22px rgba(40,55,84,.07); }
 .cue-row.issue { border-left: 3px solid #e25f59; }
 .cue-row.locked { background: #f8fafc; }
+.cue-row.seq-conflict { border-color: #d0503f; box-shadow: 0 0 0 3px rgba(208, 52, 44, .1); }
+.dubbing-fit { padding: 2px 7px; border-radius: 999px; color: #54637a; background: #edf1f7; font-family: ui-monospace, monospace; font-size: 10px; white-space: nowrap; }
+.dubbing-fit.overflow { color: #b0291f; background: #fdeceb; font-weight: 700; }
 .cue-number { padding-top: 5px; color: #9aa6b8; font-family: ui-monospace, monospace; font-size: 12px; text-align: center; }
 .cue-main { min-width: 0; }
 .cue-topline { display: flex; align-items: center; gap: 8px; min-height: 24px; color: #7b879a; }
@@ -106,6 +115,11 @@ button, input, textarea { font: inherit; }
 .check-card p { margin: 5px 0; font-size: 11px; line-height: 1.45; }
 .check-ok { color: #358268; }
 .check-warning { color: #ad6610; }
+.check-note { color: #7c8799; }
+.dubbing-card { margin-top: 8px; padding: 10px 11px; border: 1px solid #e0e7f0; border-radius: 9px; background: #f8fafc; }
+.dubbing-card.overflow { border-color: #efb8b2; background: #fff7f6; }
+.dubbing-card h3 { margin: 0 0 6px; color: #34435b; font-size: 12px; }
+.dubbing-card p { margin: 4px 0; font-size: 11px; line-height: 1.5; }
 .cue-index { color: #8190a7; font-family: ui-monospace, monospace; }
 .shortcut-bar { position: fixed; z-index: 25; left: 258px; right: 360px; bottom: 0; height: 36px; display: flex; align-items: center; gap: 16px; padding: 0 18px; color: #c8d3e3; background: rgba(16, 29, 49, .96); font-size: 10px; }
 .shortcut-bar strong { color: #f2ba5d; }

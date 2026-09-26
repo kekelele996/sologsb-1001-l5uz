@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia'
-import type { Cue, EditorDocument, Locale, Snapshot } from '../types'
+import type { ArrangeConflict, Cue, EditorDocument, Locale, Snapshot } from '../types'
 import { loadDocument, saveDocument } from '../utils/db'
 import { makeId } from '../utils/id'
 import { parseScript, parseSrt, toSrt } from '../utils/subtitle'
+import { ARRANGE_GAP, estimateCue } from '../utils/dubbing'
 import { translate, type MessageKey } from '../i18n'
 
 const DOCUMENT_ID = 'subtitle-dubbing-document'
@@ -60,6 +61,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
     mutationSerial: 0,
     past: [] as { label: string; cues: Cue[]; selectedCueId: string | null }[],
     future: [] as { label: string; cues: Cue[]; selectedCueId: string | null }[],
+    arrangeConflict: null as ArrangeConflict | null,
   }),
   getters: {
     t: (state) => (key: MessageKey, values?: Record<string, string | number>) => translate(state.document.language, key, values),
@@ -127,6 +129,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
       if (this.past.length > 60) this.past.shift()
       this.future = []
       this.document.cues = working
+      this.arrangeConflict = null
       if (nextSelection !== undefined) this.selectedCueId = nextSelection
       this.markChanged(label)
     },
@@ -192,6 +195,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
       this.document = latest
       this.lastSeenRevision = latest.revision
       this.conflict = false
+      this.arrangeConflict = null
       this.saveState = 'saved'
       this.selectedCueId = latest.cues[0]?.id ?? null
     },
@@ -201,6 +205,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
       this.future.push({ label: entry.label, cues: cloneCues(this.document.cues), selectedCueId: this.selectedCueId })
       this.document.cues = cloneCues(entry.cues)
       this.selectedCueId = entry.selectedCueId
+      this.arrangeConflict = null
       this.markChanged(`undo:${entry.label}`)
     },
     redo() {
@@ -209,6 +214,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
       this.past.push({ label: entry.label, cues: cloneCues(this.document.cues), selectedCueId: this.selectedCueId })
       this.document.cues = cloneCues(entry.cues)
       this.selectedCueId = entry.selectedCueId
+      this.arrangeConflict = null
       this.markChanged(`redo:${entry.label}`)
     },
     updateCue(id: string, patch: Partial<Cue>, historyLabel = 'update-cue') {
@@ -284,6 +290,52 @@ export const useEditorStore = defineStore('subtitle-editor', {
         if (index >= 0) cues.splice(index, 1)
       }, this.document.cues[Math.max(0, this.document.cues.findIndex((item) => item.id === id) - 1)]?.id ?? null)
     },
+    /**
+     * 顺排：未锁台词从上一条结束后 0.2s 依次排开，锁定台词保留原时间。
+     * 若上一条（含其配音估算时长）会挤进锁定区间，则停在冲突位置并标出冲突；
+     * 冲突前已顺排的部分照常提交，可用撤销整体回退。
+     */
+    arrangeCues(): ArrangeConflict | null {
+      const cues = cloneCues(this.document.cues)
+      const round2 = (value: number) => Math.round(value * 100) / 100
+      let changed = false
+      for (let i = 0; i < cues.length; i += 1) {
+        const cue = cues[i]
+        if (cue.locked) {
+          const previous = cues[i - 1]
+          if (previous) {
+            // 锁定区间必须在上一条（按估算念完）之后再留 0.2s 间隔
+            const estimatedEnd = previous.start + estimateCue(previous).estimated
+            const requiredStart = Math.max(previous.end, estimatedEnd) + ARRANGE_GAP
+            if (requiredStart > cue.start + 1e-6) {
+              const conflict: ArrangeConflict = { cueId: previous.id, lockedCueId: cue.id }
+              if (changed) {
+                this.commit('arrange', (working) => {
+                  working.splice(0, working.length, ...cues)
+                })
+                this.arrangeConflict = conflict
+              } else {
+                this.arrangeConflict = conflict
+              }
+              return conflict
+            }
+          }
+          continue
+        }
+        const start = i === 0 ? cue.start : round2(cues[i - 1].end + ARRANGE_GAP)
+        const end = round2(start + Math.max(0, cue.end - cue.start))
+        if (Math.abs(start - cue.start) > 1e-6 || Math.abs(end - cue.end) > 1e-6) {
+          cue.start = start
+          cue.end = end
+          changed = true
+        }
+      }
+      if (changed) this.commit('arrange', (working) => working.splice(0, working.length, ...cues))
+      return null
+    },
+    dismissArrangeConflict() {
+      this.arrangeConflict = null
+    },
     createSnapshot(name: string) {
       const snapshot: Snapshot = { id: makeId('snapshot'), name: name.trim() || `v${this.document.snapshots.length + 1}`, createdAt: Date.now(), cues: cloneCues(this.document.cues) }
       this.document.snapshots.unshift(snapshot)
@@ -295,6 +347,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
       this.past.push({ label: 'restore-snapshot', cues: cloneCues(this.document.cues), selectedCueId: this.selectedCueId })
       this.future = []
       this.document.cues = cloneCues(snapshot.cues)
+      this.arrangeConflict = null
       this.selectedCueId = this.document.cues[0]?.id ?? null
       this.markChanged('restore-snapshot')
     },

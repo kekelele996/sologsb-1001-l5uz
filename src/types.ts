@@ -54,6 +54,13 @@ export interface CueConflict {
   message: string
 }
 
+export interface ArrangeConflict {
+  /** 估算会挤进锁定区间的那一条台词 */
+  cueId: string
+  /** 被挡住的锁定台词 */
+  lockedCueId: string
+}
+
 export interface HistoryEntry {
   label: string
   cues: Cue[]

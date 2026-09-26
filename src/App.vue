@@ -4,18 +4,69 @@ import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Clock, Delete, DocumentCopy, Download, EditPen, Files, Lock, MagicStick, Monitor,
-  RefreshLeft, RefreshRight, Search, Unlock, UploadFilled,
+  RefreshLeft, RefreshRight, Search, Sort, Timer, Unlock, UploadFilled, WarningFilled,
 } from '@element-plus/icons-vue'
 import { useEditorStore } from './store/editor'
 import type { Cue, CueConflict } from './types'
 import { formatTime } from './utils/subtitle'
+import { estimateCue, formatSeconds } from './utils/dubbing'
 
 const store = useEditorStore()
-const { document: project, selectedCue, selectedCueId, visibleCues, saveState, conflict, online, timelineZoom, actorFilter } = storeToRefs(store)
+const { document: project, selectedCue, selectedCueId, visibleCues, saveState, conflict, online, timelineZoom, actorFilter, arrangeConflict } = storeToRefs(store)
 const fileInput = ref<HTMLInputElement>()
 const snapshotDialog = ref(false)
 const snapshotName = ref('')
 const search = ref('')
+
+// 估时只依赖台词自身，做按 id+内容 的缓存，筛选和切语言后仍是同一套数据计算结果
+const estimateCache = new WeakMap<Cue, ReturnType<typeof estimateCue>>()
+function cueTiming(cue: Cue) {
+  const cached = estimateCache.get(cue)
+  if (cached && cached.text === (cue.target?.trim() ? cue.target : cue.source) && cached.speed === cue.speed && cached.slot === cue.end - cue.start) return cached
+  const estimate = estimateCue(cue)
+  estimateCache.set(cue, estimate)
+  return estimate
+}
+function timingTitle(cue: Cue): string {
+  const estimate = cueTiming(cue)
+  const detail = store.t('estimateDetail', {
+    chars: estimate.characters,
+    speed: estimate.speed.toFixed(2),
+    estimated: formatSeconds(Number(estimate.estimated.toFixed(2))),
+    slot: formatSeconds(Number(estimate.slot.toFixed(2))),
+  })
+  if (estimate.risk === 'overflow') {
+    return `${detail}\n${store.t('overflowTag', { seconds: estimate.overflow.toFixed(1) })}${!cue.target?.trim() ? `\n${store.t('estimateFromSource')}` : ''}`
+  }
+  return `${detail}\n${store.t(estimate.risk === 'tight' ? 'tightTag' : 'fitTag')}`
+}
+function timelineTitle(cue: Cue): string {
+  return `${formatTime(cue.start)} · ${cue.source}\n${timingTitle(cue)}`
+}
+const overflowCount = computed(() => filteredCues.value.filter((cue) => cueTiming(cue).risk === 'overflow').length)
+const cueNumber = (id: string) => project.value.cues.findIndex((cue) => cue.id === id) + 1
+const arrangeConflictText = computed(() => {
+  const data = arrangeConflict.value
+  if (!data) return ''
+  const cue = project.value.cues.find((item) => item.id === data.cueId)
+  const locked = project.value.cues.find((item) => item.id === data.lockedCueId)
+  if (!cue || !locked) return ''
+  return store.t('arrangeConflictBody', {
+    index: cueNumber(data.cueId),
+    lockedIndex: cueNumber(data.lockedCueId),
+    time: formatSeconds(Number((cue.start + cueTiming(cue).estimated).toFixed(1))),
+    lockedStart: formatSeconds(Number(locked.start.toFixed(1))),
+  })
+})
+const selectedTiming = computed(() => selectedCue.value ? cueTiming(selectedCue.value) : null)
+function runArrange() {
+  const result = store.arrangeCues()
+  if (result) {
+    ElMessage.error({ message: store.t('arrangeConflictTitle'), duration: 4000 })
+  } else if (store.past.length) {
+    ElMessage.success(store.t('arrange'))
+  }
+}
 
 const filteredCues = computed(() => {
   const query = search.value.trim().toLowerCase()
@@ -215,9 +266,9 @@ const handleOffline = () => setOnline(false)
           <div class="timeline-scroll">
             <div class="timeline" :style="{ width: `${timelineZoom * 100}%` }">
               <button
-                v-for="cue in filteredCues" :key="cue.id" class="timeline-block" :class="{ active: cue.id === selectedCueId, issue: cue.status === 'issue', locked: cue.locked }"
+                v-for="cue in filteredCues" :key="cue.id" class="timeline-block" :class="{ active: cue.id === selectedCueId, issue: cue.status === 'issue', locked: cue.locked, [cueTiming(cue).risk]: cueTiming(cue).risk !== 'fit', 'arrange-conflict': arrangeConflict && (cue.id === arrangeConflict.cueId || cue.id === arrangeConflict.lockedCueId) }"
                 :style="{ left: `${(cue.start / store.totalDuration) * 100}%`, width: `${Math.max(1.8, ((cue.end - cue.start) / store.totalDuration) * 100)}%`, borderColor: actorColor(cue.actorId) }"
-                :title="`${formatTime(cue.start)} · ${cue.source}`" @click="store.selectCue(cue.id)"
+                :title="timelineTitle(cue)" @click="store.selectCue(cue.id)"
               ><span>{{ actorName(cue.actorId).split('/')[0] }}</span><b>{{ cue.target || cue.source }}</b></button>
               <div class="timeline-ruler"><span v-for="tick in [0, 15, 30, 45, 60]" :key="tick" :style="{ left: `${(tick / store.totalDuration) * 100}%` }">{{ tick }}s</span></div>
             </div>
@@ -226,16 +277,34 @@ const handleOffline = () => setOnline(false)
 
         <div class="cue-toolbar">
           <div class="section-heading"><span>{{ store.t('cues') }}</span><el-tag size="small" type="info">{{ filteredCues.length }}</el-tag></div>
-          <el-input v-model="search" :prefix-icon="Search" clearable placeholder="搜索原文或译文" class="cue-search" />
-          <el-select v-model="actorFilter" class="actor-mobile-filter">
-            <el-option :label="store.t('allActors')" value="all" />
-            <el-option v-for="actor in project.actors" :key="actor.id" :label="actor.name" :value="actor.id" />
-          </el-select>
+          <div class="cue-toolbar-actions">
+            <el-tag v-if="overflowCount" size="small" type="danger" effect="light" class="overflow-tag">
+              <el-icon><WarningFilled /></el-icon>{{ store.t('overflowCount', { count: overflowCount }) }}
+            </el-tag>
+            <el-tooltip :content="store.t('arrangeTooltip')" placement="top">
+              <el-button size="small" type="primary" plain :icon="Sort" @click="runArrange">{{ store.t('arrange') }}</el-button>
+            </el-tooltip>
+            <el-input v-model="search" :prefix-icon="Search" clearable placeholder="搜索原文或译文" class="cue-search" />
+            <el-select v-model="actorFilter" class="actor-mobile-filter">
+              <el-option :label="store.t('allActors')" value="all" />
+              <el-option v-for="actor in project.actors" :key="actor.id" :label="actor.name" :value="actor.id" />
+            </el-select>
+          </div>
+        </div>
+
+        <div v-if="arrangeConflictText" class="arrange-conflict-banner">
+          <el-icon><WarningFilled /></el-icon>
+          <div>
+            <strong>{{ store.t('arrangeConflictTitle') }}</strong>
+            <span>{{ arrangeConflictText }}</span>
+          </div>
+          <el-button size="small" :icon="RefreshLeft" @click="store.undo">{{ store.t('undo') }}</el-button>
+          <el-button size="small" text @click="store.dismissArrangeConflict">×</el-button>
         </div>
 
         <div class="cue-list">
           <article
-            v-for="(cue, index) in filteredCues" :key="cue.id" class="cue-row" :class="{ active: cue.id === selectedCueId, issue: cue.status === 'issue', locked: cue.locked }"
+            v-for="(cue, index) in filteredCues" :key="cue.id" class="cue-row" :class="{ active: cue.id === selectedCueId, issue: cue.status === 'issue', locked: cue.locked, 'arrange-conflict': arrangeConflict && (cue.id === arrangeConflict.cueId || cue.id === arrangeConflict.lockedCueId) }"
             tabindex="0" @click="store.selectCue(cue.id)" @keydown.enter="store.selectCue(cue.id)"
           >
             <div class="cue-number">{{ String(index + 1).padStart(2, '0') }}</div>
@@ -245,6 +314,10 @@ const handleOffline = () => setOnline(false)
                 <code>{{ formatTime(cue.start) }} → {{ formatTime(cue.end) }}</code>
                 <el-tag size="small" :type="statusType(cue.status)">{{ statusLabel(cue.status) }}</el-tag>
                 <el-icon v-if="cue.locked"><Lock /></el-icon>
+                <span class="timing-badge" :class="cueTiming(cue).risk" :title="timingTitle(cue)">
+                  <el-icon><Timer /></el-icon>{{ formatSeconds(Number(cueTiming(cue).estimated.toFixed(1))) }}
+                  <template v-if="cueTiming(cue).risk === 'overflow'">· {{ store.t('overflowTag', { seconds: cueTiming(cue).overflow.toFixed(1) }) }}</template>
+                </span>
                 <span class="cue-warning-count" v-if="cueWarnings(cue).length">{{ cueWarnings(cue).length }} context</span>
               </div>
               <p class="source-text">{{ cue.source }}</p>
@@ -289,6 +362,19 @@ const handleOffline = () => setOnline(false)
           <el-select :model-value="selectedCue.termIds" multiple :disabled="selectedCue.locked" @change="updateSelected({ termIds: $event }, 'terms')">
             <el-option v-for="term in project.terms" :key="term.id" :label="`${term.source} → ${term.target}`" :value="term.id" />
           </el-select>
+
+          <div v-if="selectedTiming" class="timing-card" :class="selectedTiming.risk">
+            <h3><el-icon><Timer /></el-icon>{{ store.t('estimate') }}</h3>
+            <div class="timing-grid">
+              <span>{{ store.t('estimatedDuration') }}</span><b>{{ formatSeconds(Number(selectedTiming.estimated.toFixed(2))) }}</b>
+              <span>{{ store.t('slotDuration') }}</span><b>{{ formatSeconds(Number(selectedTiming.slot.toFixed(2))) }}</b>
+            </div>
+            <p class="timing-rule">{{ store.t('estimateDetail', { chars: selectedTiming.characters, speed: selectedTiming.speed.toFixed(2), estimated: formatSeconds(Number(selectedTiming.estimated.toFixed(2))), slot: formatSeconds(Number(selectedTiming.slot.toFixed(2))) }) }}</p>
+            <p v-if="!selectedCue?.target?.trim()" class="timing-note">{{ store.t('estimateFromSource') }}</p>
+            <p v-if="selectedTiming.risk === 'overflow'" class="check-danger">{{ store.t('overflowTag', { seconds: selectedTiming.overflow.toFixed(1) }) }}</p>
+            <p v-else class="check-ok">{{ store.t(selectedTiming.risk === 'tight' ? 'tightTag' : 'fitTag') }}</p>
+          </div>
+
           <div class="inspector-actions">
             <el-button :icon="selectedCue.locked ? Unlock : Lock" @click="store.toggleLock(selectedCue.id)">{{ selectedCue.locked ? store.t('unlock') : store.t('lock') }}</el-button>
             <el-button @click="store.moveCue(selectedCue.id, -1)">↑ {{ store.t('moveUp') }}</el-button>
